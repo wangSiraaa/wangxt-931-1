@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>低保走访核查系统</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="app-container">
+    <header class="app-header">
+      <h1>🏠 低保走访核查协同系统</h1>
+      <div class="role-switcher">
+        <label>当前角色：</label>
+        <select id="roleSelect">
+          <option value="civil">民政专员</option>
+          <option value="grid">网格员</option>
+          <option value="reviewer">审核员</option>
+        </select>
+        <input type="text" id="operatorName" placeholder="操作员姓名" value="操作员A">
+      </div>
+    </header>
+
+    <nav class="app-nav">
+      <button class="nav-btn active" data-page="families">📋 家庭档案</button>
+      <button class="nav-btn" data-page="visits">🚶 走访核查</button>
+      <button class="nav-btn" data-page="reviews">✅ 审核审批</button>
+      <button class="nav-btn" data-page="subsidies">💰 补贴发放</button>
+      <button class="nav-btn" data-page="restorations">🔄 资格恢复</button>
+    </nav>
+
+    <main class="app-main">
+      <!-- 家庭档案页 -->
+      <section id="page-families" class="page active">
+        <div class="page-header">
+          <h2>家庭档案管理 <span class="role-badge">民政专员</span></h2>
+          <button class="btn btn-primary" id="btnAddFamily">➕ 新建家庭档案</button>
+        </div>
+        <div id="familyList" class="data-list"></div>
+      </section>
+
+      <!-- 走访核查页 -->
+      <section id="page-visits" class="page">
+        <div class="page-header">
+          <h2>走访核查登记 <span class="role-badge">网格员</span></h2>
+          <button class="btn btn-primary" id="btnAddVisit">📝 新增走访记录</button>
+        </div>
+        <div id="visitList" class="data-list"></div>
+      </section>
+
+      <!-- 审核审批页 -->
+      <section id="page-reviews" class="page">
+        <div class="page-header">
+          <h2>审核审批 <span class="role-badge">审核员</span></h2>
+          <div class="threshold-info">收入阈值：<strong id="thresholdValue">-</strong> 元/月</div>
+        </div>
+        <div class="tabs">
+          <button class="tab-btn active" data-tab="pending">待审核</button>
+          <button class="tab-btn" data-tab="history">审核记录</button>
+        </div>
+        <div id="pendingReviews" class="tab-content active"></div>
+        <div id="reviewHistory" class="tab-content"></div>
+      </section>
+
+      <!-- 补贴发放页 -->
+      <section id="page-subsidies" class="page">
+        <div class="page-header">
+          <h2>补贴发放管理</h2>
+          <button class="btn btn-primary" id="btnAddSubsidy">💵 生成补贴</button>
+        </div>
+        <div id="subsidyList" class="data-list"></div>
+      </section>
+
+      <!-- 资格恢复页 -->
+      <section id="page-restorations" class="page">
+        <div class="page-header">
+          <h2>资格恢复申请</h2>
+          <button class="btn btn-primary" id="btnAddRestoration">📝 发起恢复申请</button>
+        </div>
+        <div id="restorationList" class="data-list"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- 家庭档案弹窗 -->
+  <div id="familyModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="familyModalTitle">新建家庭档案</h3>
+        <span class="close" onclick="closeModal('familyModal')">&times;</span>
+      </div>
+      <div class="modal-body">
+        <form id="familyForm">
+          <div class="form-grid">
+            <div class="form-item">
+              <label>家庭编号 *</label>
+              <input type="text" name="family_code" required placeholder="如：F004">
+            </div>
+            <div class="form-item">
+              <label>户主姓名 *</label>
+              <input type="text" name="head_name" required>
+            </div>
+            <div class="form-item">
+              <label>家庭住址 *</label>
+              <input type="text" name="address" required>
+            </div>
+            <div class="form-item">
+              <label>收入来源 *</label>
+              <select name="income_source" required>
+                <option value="">请选择</option>
+                <option value="工资收入">工资收入</option>
+                <option value="打零工">打零工</option>
+                <option value="退休金">退休金</option>
+                <option value="无">无</option>
+                <option value="其他">其他</option>
+              </select>
+            </div>
+            <div class="form-item">
+              <label>建档人</label>
+              <input type="text" name="created_by" id="familyCreatedBy">
+            </div>
+            <div class="form-item">
+              <label>上次复核结论</label>
+              <input type="text" name="last_review_conclusion">
+            </div>
+          </div>
+          <div class="form-section">
+            <h4>家庭成员 <span class="required">*</span></h4>
+            <div id="membersList"></div>
+            <button type="button" class="btn btn-secondary" onclick="addMemberRow()">➕ 添加成员</button>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('familyModal')">取消</button>
+        <button class="btn btn-primary" onclick="saveFamily()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 走访弹窗 -->
+  <div id="visitModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>新增走访记录</h3>
+        <span class="close" onclick="closeModal('visitModal')">&times;</span>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-warning" id="visitAlert" style="display:none;"></div>
+        <form id="visitForm">
+          <div class="form-grid">
+            <div class="form-item">
+              <label>选择家庭 *</label>
+              <select name="family_id" id="visitFamilyId" required></select>
+            </div>
+            <div class="form-item">
+              <label>走访人 *</label>
+              <input type="text" name="visitor_name" id="visitVisitor" required>
+            </div>
+            <div class="form-item">
+              <label>走访日期 *</label>
+              <input type="date" name="visit_date" required>
+            </div>
+            <div class="form-item">
+              <label>走访地点</label>
+              <input type="text" name="location" placeholder="详细地址">
+            </div>
+            <div class="form-item">
+              <label>纬度</label>
+              <input type="number" name="location_lat" step="any">
+            </div>
+            <div class="form-item">
+              <label>经度</label>
+              <input type="number" name="location_lng" step="any">
+            </div>
+            <div class="form-item">
+              <label>收入变化(元)</label>
+              <input type="number" name="income_change" value="0" step="any">
+            </div>
+            <div class="form-item">
+              <label>走访照片</label>
+              <input type="file" name="photo" accept="image/*" id="visitPhoto">
+            </div>
+          </div>
+          <div class="form-item">
+            <label>走访备注</label>
+            <textarea name="notes" rows="3"></textarea>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('visitModal')">取消</button>
+        <button class="btn btn-primary" onclick="saveVisit()">提交走访</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 审核弹窗 -->
+  <div id="reviewModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>审核走访记录</h3>
+        <span class="close" onclick="closeModal('reviewModal')">&times;</span>
+      </div>
+      <div class="modal-body">
+        <div id="reviewFamilyInfo" class="info-panel"></div>
+        <form id="reviewForm">
+          <div class="form-item">
+            <label>审核决定 *</label>
+            <select name="decision" required>
+              <option value="">请选择</option>
+              <option value="continue">继续发放</option>
+              <option value="suspend">暂停发放</option>
+              <option value="cancel">取消资格</option>
+            </select>
+          </div>
+          <div class="form-item">
+            <label>审核说明</label>
+            <textarea name="reason" rows="3"></textarea>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('reviewModal')">取消</button>
+        <button class="btn btn-primary" onclick="submitReview()">提交审核</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 补贴弹窗 -->
+  <div id="subsidyModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>生成补贴</h3>
+        <span class="close" onclick="closeModal('subsidyModal')">&times;</span>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-warning" id="subsidyAlert" style="display:none;"></div>
+        <form id="subsidyForm">
+          <div class="form-grid">
+            <div class="form-item">
+              <label>选择家庭 *</label>
+              <select name="family_id" id="subsidyFamilyId" required></select>
+            </div>
+            <div class="form-item">
+              <label>补贴期间 *</label>
+              <input type="month" name="period" required>
+            </div>
+            <div class="form-item">
+              <label>补贴金额(元) *</label>
+              <input type="number" name="amount" value="500" step="any" required>
+            </div>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('subsidyModal')">取消</button>
+        <button class="btn btn-primary" onclick="saveSubsidy()">生成补贴</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 资格恢复弹窗 -->
+  <div id="restorationModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>发起资格恢复申请</h3>
+        <span class="close" onclick="closeModal('restorationModal')">&times;</span>
+      </div>
+      <div class="modal-body">
+        <form id="restorationForm">
+          <div class="form-grid">
+            <div class="form-item">
+              <label>选择家庭 *</label>
+              <select name="family_id" id="restorationFamilyId" required></select>
+            </div>
+            <div class="form-item">
+              <label>申请人 *</label>
+              <input type="text" name="applicant_name" required>
+            </div>
+          </div>
+          <div class="form-item">
+            <label>申请理由 *</label>
+            <textarea name="reason" rows="4" required></textarea>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('restorationModal')">取消</button>
+        <button class="btn btn-primary" onclick="saveRestoration()">提交申请</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>

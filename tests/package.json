@@ -1,0 +1,13 @@
+{
+  "name": "subsidy-check-tests",
+  "version": "1.0.0",
+  "description": "低保走访核查系统 - 验证测试",
+  "main": "validate.js",
+  "scripts": {
+    "test": "node validate.js"
+  },
+  "dependencies": {
+    "node-fetch": "^2.7.0",
+    "form-data": "^4.0.0"
+  }
+}

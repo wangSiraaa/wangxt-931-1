@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  subsidy-app:
+    build: .
+    container_name: subsidy-check-app
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped
