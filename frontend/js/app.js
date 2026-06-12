@@ -303,9 +303,10 @@ async function saveVisit() {
   const photoFile = document.getElementById('visitPhoto').files[0];
 
   if (!photoFile) {
-    alertEl.textContent = '⚠️ 提示：走访照片未上传，建议上传照片后提交。系统将记录此次提交未附带照片。';
+    alertEl.textContent = '❌ 走访照片为必填项，请上传照片后再提交';
     alertEl.style.display = 'block';
-    if (!confirm('走访照片未上传，是否仍要提交？')) return;
+    alertEl.className = 'alert alert-error';
+    return;
   }
 
   const fd = new FormData();
@@ -317,7 +318,7 @@ async function saveVisit() {
   fd.append('location_lng', form.location_lng.value || '');
   fd.append('income_change', form.income_change.value || 0);
   fd.append('notes', form.notes.value || '');
-  if (photoFile) fd.append('photo', photoFile);
+  fd.append('photo', photoFile);
 
   try {
     await api('/api/visits', { method: 'POST', body: fd });

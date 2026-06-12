@@ -151,6 +151,10 @@ app.post('/api/visits', upload.single('photo'), (req, res) => {
     return res.status(400).json({ error: '走访人、走访日期和家庭为必填项' });
   }
 
+  if (!req.file) {
+    return res.status(400).json({ error: '走访照片为必填项，请上传照片后提交' });
+  }
+
   const family = getOne('SELECT * FROM families WHERE id = ?', family_id);
   if (!family) return res.status(404).json({ error: '家庭档案不存在' });
 
@@ -166,10 +170,7 @@ app.post('/api/visits', upload.single('photo'), (req, res) => {
     return res.status(400).json({ error: '家庭成员信息不完整，不能提交走访记录' });
   }
 
-  let photo_path = null;
-  if (req.file) {
-    photo_path = req.file.filename;
-  }
+  const photo_path = req.file.filename;
 
   const info = run(`
     INSERT INTO visits (family_id, visitor_name, visit_date, location, location_lat, location_lng, income_change, notes, photo_path, status)
@@ -177,7 +178,7 @@ app.post('/api/visits', upload.single('photo'), (req, res) => {
   `, family_id, visitor_name, visit_date, location || null, location_lat || null, location_lng || null,
        income_change || 0, notes || null, photo_path);
 
-  res.json({ id: info.lastInsertRowid, message: '走访记录提交成功', photo_required: !photo_path });
+  res.json({ id: info.lastInsertRowid, message: '走访记录提交成功' });
 });
 
 // ==================== 审核 API ====================

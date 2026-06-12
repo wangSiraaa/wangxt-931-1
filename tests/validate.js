@@ -15,7 +15,23 @@ async function request(path, options = {}) {
   opts.method = options.method || 'GET';
   if (options.formData) {
     delete opts.headers['Content-Type'];
-    opts.body = options.formData;
+    const fd = options.formData;
+    if (fd.getHeaders) {
+      opts.headers = { ...opts.headers, ...fd.getHeaders() };
+    }
+    if (fd.toBuffer) {
+      opts.body = fd.toBuffer();
+    } else if (fd.pipe) {
+      opts.body = await new Promise((resolve, reject) => {
+        const chunks = [];
+        fd.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        fd.on('end', () => resolve(Buffer.concat(chunks)));
+        fd.on('error', reject);
+        fd.resume();
+      });
+    } else {
+      opts.body = fd;
+    }
   }
   const res = await fetch(fullUrl, opts);
   const data = await res.json().catch(() => ({}));
@@ -45,9 +61,29 @@ function assertEqual(actual, expected, message) {
   if (actual !== expected) throw new Error(message || `期望 ${expected}，实际 ${actual}`);
 }
 
+async function getVisitCount() {
+  const res = await request('/api/visits');
+  assert(res.ok, '获取走访列表失败');
+  return res.data.length;
+}
+
+async function getSubmittedVisitCount() {
+  const res = await request('/api/visits');
+  assert(res.ok, '获取走访列表失败');
+  return res.data.filter(v => v.status === 'submitted').length;
+}
+
+function makePhotoBuffer() {
+  const FormData = require('form-data');
+  const fd = new FormData();
+  const buf = Buffer.from('fake-image-content-for-testing');
+  fd.append('photo', buf, { filename: 'test-photo.jpg', contentType: 'image/jpeg' });
+  return fd;
+}
+
 async function runTests() {
   console.log('\n' + '='.repeat(60));
-  console.log('  低保走访核查系统 - 验证测试');
+  console.log('  低保走访核查系统 - 回归验证测试');
   console.log('  API地址:', BASE_URL);
   console.log('='.repeat(60) + '\n');
 
@@ -66,78 +102,109 @@ async function runTests() {
     console.log('       已存在家庭档案数量:', res.data.length);
   })();
 
-  let newFamilyId = null;
-  await test('民政专员 - 新建家庭档案（含成员）', async () => {
+  let normalFamilyId = null;
+  await test('民政专员 - 新建完整家庭档案（含成员）', async () => {
     const res = await request('/api/families', {
       method: 'POST',
       body: {
-        family_code: 'TEST-' + Date.now().toString().slice(-6),
-        head_name: '测试家庭户主',
-        address: '测试社区1号楼101',
+        family_code: 'REG-' + Date.now().toString().slice(-6),
+        head_name: '回归测试户主',
+        address: '回归测试社区1号楼101',
         income_source: '打零工',
         last_review_conclusion: '初始建档',
         created_by: '民政专员A',
         members: [
-          { name: '测试家庭户主', relation: '户主', age: 45, income: 300, employment_status: '灵活就业' },
-          { name: '测试家庭成员', relation: '配偶', age: 43, income: 200, employment_status: '待业' },
-          { name: '测试子女', relation: '子女', age: 10, income: 0, employment_status: '学生' }
+          { name: '回归测试户主', relation: '户主', age: 45, income: 300, employment_status: '灵活就业' },
+          { name: '回归测试配偶', relation: '配偶', age: 43, income: 200, employment_status: '待业' },
+          { name: '回归测试子女', relation: '子女', age: 10, income: 0, employment_status: '学生' }
         ]
       }
     });
     assert(res.ok, '创建失败: ' + (res.data.error || ''));
     assert(res.data.id, '未返回家庭ID');
-    newFamilyId = res.data.id;
-    console.log('       新建家庭ID:', newFamilyId);
+    normalFamilyId = res.data.id;
+    console.log('       新建家庭ID:', normalFamilyId);
   })();
 
   await test('查询家庭档案详情（含成员和总收入）', async () => {
-    assert(newFamilyId, '需要先创建家庭档案');
-    const res = await request('/api/families/' + newFamilyId);
+    assert(normalFamilyId, '需要先创建家庭档案');
+    const res = await request('/api/families/' + normalFamilyId);
     assert(res.ok, '查询失败');
     assertEqual(res.data.members.length, 3, '家庭成员数量不符');
     assertEqual(res.data.total_income, 500, '家庭总收入计算错误');
     console.log('       家庭月总收入:', res.data.total_income, '元');
   })();
 
-  await test('网格员 - 走访照片缺失不能提交', async () => {
-    assert(newFamilyId, '需要先创建家庭档案');
-    const FormData = global.FormData || require('form-data');
+  // ======== 三类校验：照片缺失、日期早于建档、信息不完整 ========
+
+  await test('校验1 - 走访照片缺失：POST /api/visits 返回400且不写入记录', async () => {
+    assert(normalFamilyId, '需要先创建家庭档案');
+    const FormData = require('form-data');
     const fd = new FormData();
-    fd.append('family_id', newFamilyId);
+    fd.append('family_id', normalFamilyId);
     fd.append('visitor_name', '网格员A');
     fd.append('visit_date', new Date().toISOString().split('T')[0]);
     fd.append('notes', '测试无照片走访');
-    fd.append('location', '测试地点');
 
-    const res = await request('/api/visits', {
-      method: 'POST',
-      formData: fd
-    });
-    assert(res.ok, '走访提交异常: ' + (res.data.error || ''));
-    assert(res.data.photo_required === true, '未标记照片缺失状态');
-    console.log('       走访已提交，系统标记照片缺失:', res.data.photo_required);
+    const beforeCount = await getVisitCount();
+    const res = await request('/api/visits', { method: 'POST', formData: fd });
+    const afterCount = await getVisitCount();
+
+    assertEqual(res.status, 400, '照片缺失应返回400状态码');
+    assert(res.data.error && res.data.error.includes('照片'), '错误信息应包含照片: ' + (res.data.error || ''));
+    assertEqual(afterCount, beforeCount, '照片缺失时不应写入visits记录');
+    console.log('       服务器正确拒绝:', res.data.error);
+    console.log('       走访记录数: 提交前', beforeCount, '→ 提交后', afterCount, '(无变化)');
   })();
 
-  await test('网格员 - 走访日期早于建档日期应被拒绝', async () => {
-    assert(newFamilyId, '需要先创建家庭档案');
-    const FormData = global.FormData || require('form-data');
+  await test('校验1续 - 照片缺失时不生成待审核走访', async () => {
+    const pendingBefore = await getSubmittedVisitCount();
+    const FormData = require('form-data');
     const fd = new FormData();
-    fd.append('family_id', newFamilyId);
+    fd.append('family_id', normalFamilyId);
+    fd.append('visitor_name', '网格员A');
+    fd.append('visit_date', new Date().toISOString().split('T')[0]);
+
+    await request('/api/visits', { method: 'POST', formData: fd });
+    const pendingAfter = await getSubmittedVisitCount();
+    assertEqual(pendingAfter, pendingBefore, '照片缺失不应产生新的待审核走访');
+    console.log('       待审核走访数: 提交前', pendingBefore, '→ 提交后', pendingAfter, '(无变化)');
+  })();
+
+  await test('校验2 - 走访日期早于建档日期：POST /api/visits 返回400且不写入记录', async () => {
+    assert(normalFamilyId, '需要先创建家庭档案');
+    const fd = makePhotoBuffer();
+    fd.append('family_id', normalFamilyId);
     fd.append('visitor_name', '网格员A');
     fd.append('visit_date', '2020-01-01');
     fd.append('notes', '测试日期早于建档');
 
-    const res = await request('/api/visits', {
-      method: 'POST',
-      formData: fd
-    });
-    assertEqual(res.status, 400, '应返回400状态码');
+    const beforeCount = await getVisitCount();
+    const res = await request('/api/visits', { method: 'POST', formData: fd });
+    const afterCount = await getVisitCount();
+
+    assertEqual(res.status, 400, '日期早于建档应返回400状态码');
     assert(res.data.error && res.data.error.includes('早于建档日期'), '错误信息不符: ' + (res.data.error || ''));
+    assertEqual(afterCount, beforeCount, '日期早于建档时不应写入visits记录');
     console.log('       服务器正确拒绝:', res.data.error);
+    console.log('       走访记录数: 提交前', beforeCount, '→ 提交后', afterCount, '(无变化)');
+  })();
+
+  await test('校验2续 - 日期早于建档时不生成待审核走访', async () => {
+    const pendingBefore = await getSubmittedVisitCount();
+    const fd = makePhotoBuffer();
+    fd.append('family_id', normalFamilyId);
+    fd.append('visitor_name', '网格员A');
+    fd.append('visit_date', '2020-01-01');
+
+    await request('/api/visits', { method: 'POST', formData: fd });
+    const pendingAfter = await getSubmittedVisitCount();
+    assertEqual(pendingAfter, pendingBefore, '日期早于建档不应产生新的待审核走访');
+    console.log('       待审核走访数: 提交前', pendingBefore, '→ 提交后', pendingAfter, '(无变化)');
   })();
 
   let incompleteFamilyId = null;
-  await test('创建家庭后故意置空字段以模拟信息不完整（仅用于测试）', async () => {
+  await test('创建不完整家庭（head_name置空）以模拟信息不完整', async () => {
     const code = 'INC-' + Date.now().toString().slice(-6);
     const res = await request('/api/families', {
       method: 'POST',
@@ -164,24 +231,72 @@ async function runTests() {
       }
     });
     assert(updateRes.ok, '置空字段失败');
+    console.log('       不完整家庭ID:', incompleteFamilyId);
   })();
 
-  await test('网格员 - 家庭成员信息不完整不能提交走访', async () => {
+  await test('校验3 - 家庭成员信息不完整：POST /api/visits 返回400且不写入记录', async () => {
     assert(incompleteFamilyId, '需要先创建不完整家庭');
-    const FormData = global.FormData || require('form-data');
-    const fd = new FormData();
+    const fd = makePhotoBuffer();
     fd.append('family_id', incompleteFamilyId);
     fd.append('visitor_name', '网格员A');
     fd.append('visit_date', new Date().toISOString().split('T')[0]);
 
-    const res = await request('/api/visits', {
-      method: 'POST',
-      formData: fd
-    });
-    assertEqual(res.status, 400, '应返回400状态码');
+    const beforeCount = await getVisitCount();
+    const res = await request('/api/visits', { method: 'POST', formData: fd });
+    const afterCount = await getVisitCount();
+
+    assertEqual(res.status, 400, '信息不完整应返回400状态码');
     assert(res.data.error && res.data.error.includes('信息不完整'), '错误信息不符: ' + (res.data.error || ''));
+    assertEqual(afterCount, beforeCount, '信息不完整时不应写入visits记录');
     console.log('       服务器正确拒绝:', res.data.error);
+    console.log('       走访记录数: 提交前', beforeCount, '→ 提交后', afterCount, '(无变化)');
   })();
+
+  await test('校验3续 - 信息不完整时不生成待审核走访', async () => {
+    const pendingBefore = await getSubmittedVisitCount();
+    const fd = makePhotoBuffer();
+    fd.append('family_id', incompleteFamilyId);
+    fd.append('visitor_name', '网格员A');
+    fd.append('visit_date', new Date().toISOString().split('T')[0]);
+
+    await request('/api/visits', { method: 'POST', formData: fd });
+    const pendingAfter = await getSubmittedVisitCount();
+    assertEqual(pendingAfter, pendingBefore, '信息不完整不应产生新的待审核走访');
+    console.log('       待审核走访数: 提交前', pendingBefore, '→ 提交后', pendingAfter, '(无变化)');
+  })();
+
+  // ======== 正常走访提交（有照片、日期合规、信息完整） ========
+
+  let normalVisitId = null;
+  await test('正常走访提交：有照片+合规日期+完整信息，应成功', async () => {
+    assert(normalFamilyId, '需要先创建家庭档案');
+    const fd = makePhotoBuffer();
+    fd.append('family_id', normalFamilyId);
+    fd.append('visitor_name', '网格员A');
+    fd.append('visit_date', new Date().toISOString().split('T')[0]);
+    fd.append('income_change', '0');
+    fd.append('notes', '正常走访');
+
+    const beforeCount = await getVisitCount();
+    const res = await request('/api/visits', { method: 'POST', formData: fd });
+    const afterCount = await getVisitCount();
+
+    assert(res.ok, '正常走访提交失败: ' + (res.data.error || ''));
+    assert(res.data.id, '未返回走访ID');
+    assertEqual(afterCount, beforeCount + 1, '正常走访应写入visits记录');
+    normalVisitId = res.data.id;
+    console.log('       走访记录ID:', normalVisitId);
+    console.log('       走访记录数: 提交前', beforeCount, '→ 提交后', afterCount, '(+1)');
+  })();
+
+  await test('正常走访提交后生成待审核走访', async () => {
+    const visit = await request('/api/visits/' + normalVisitId);
+    assert(visit.ok, '查询走访记录失败');
+    assertEqual(visit.data.status, 'submitted', '正常走访状态应为submitted');
+    console.log('       走访状态:', visit.data.status, '(待审核)');
+  })();
+
+  // ======== 高收入超阈值复核 ========
 
   let highIncomeFamilyId = null;
   await test('创建高收入家庭（用于超阈值测试）', async () => {
@@ -199,26 +314,25 @@ async function runTests() {
         ]
       }
     });
+    assert(res.ok, '创建高收入家庭失败');
     highIncomeFamilyId = res.data.id;
+    console.log('       高收入家庭ID:', highIncomeFamilyId);
   })();
 
   let highIncomeVisitId = null;
-  await test('为高收入家庭提交走访记录', async () => {
+  await test('为高收入家庭提交走访记录（有照片）', async () => {
     assert(highIncomeFamilyId);
-    const FormData = global.FormData || require('form-data');
-    const fd = new FormData();
+    const fd = makePhotoBuffer();
     fd.append('family_id', highIncomeFamilyId);
     fd.append('visitor_name', '网格员A');
     fd.append('visit_date', new Date().toISOString().split('T')[0]);
     fd.append('notes', '高收入家庭走访');
     fd.append('income_change', '0');
 
-    const res = await request('/api/visits', {
-      method: 'POST',
-      formData: fd
-    });
-    assert(res.ok);
+    const res = await request('/api/visits', { method: 'POST', formData: fd });
+    assert(res.ok, '走访提交失败: ' + (res.data.error || ''));
     highIncomeVisitId = res.data.id;
+    console.log('       高收入走访ID:', highIncomeVisitId);
   })();
 
   await test('审核员 - 收入超过阈值，"继续发放"应进入复核并冻结补贴', async () => {
@@ -240,7 +354,7 @@ async function runTests() {
 
     const family = await request('/api/families/' + highIncomeFamilyId);
     assertEqual(family.data.subsidy_status, 'review', '家庭状态应为"复核中"');
-    console.log('       家庭状态:', family.data.subsidy_status, '（应为: review）');
+    console.log('       家庭状态:', family.data.subsidy_status, '(应为: review)');
 
     const period = new Date().toISOString().slice(0, 7);
     const subsidies = await request('/api/subsidies');
@@ -250,6 +364,8 @@ async function runTests() {
     assert(frozen.frozen_reason && frozen.frozen_reason.includes('阈值'), '冻结原因应包含阈值');
     console.log('       补贴状态:', frozen.status, '，冻结原因:', frozen.frozen_reason);
   })();
+
+  // ======== 已取消资格家庭 ========
 
   let cancelledFamilyId = null;
   await test('查找或创建已取消资格家庭', async () => {
@@ -363,7 +479,7 @@ async function main() {
     await wait(1000);
   }
   console.log('\n❌ 无法连接到服务:', BASE_URL);
-  console.log('请确认Docker容器已启动并运行在 ' + BASE_URL);
+  console.log('请确认服务已启动并运行在 ' + BASE_URL);
   process.exit(1);
 }
 
