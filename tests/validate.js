@@ -81,6 +81,11 @@ function makePhotoBuffer() {
   return fd;
 }
 
+function getAppealStatusText(s) {
+  const map = { pending: '待审核', reviewed: '已审核' };
+  return map[s] || s;
+}
+
 async function runTests() {
   console.log('\n' + '='.repeat(60));
   console.log('  低保走访核查系统 - 回归验证测试');
@@ -441,6 +446,369 @@ async function runTests() {
     assert(res.ok);
     assert(Array.isArray(res.data));
     console.log('       补贴记录数:', res.data.length);
+  })();
+
+  // ======== 异议申诉与补贴追回 ========
+
+  let suspendedFamilyId = null;
+  await test('创建并设置暂停状态家庭（用于申诉测试）', async () => {
+    const res = await request('/api/families', {
+      method: 'POST',
+      body: {
+        family_code: 'SUS-' + Date.now().toString().slice(-6),
+        head_name: '暂停家庭户主',
+        address: '测试社区暂停楼',
+        income_source: '打零工',
+        created_by: '民政专员A',
+        members: [
+          { name: '暂停户主', relation: '户主', age: 50, income: 400 },
+          { name: '暂停配偶', relation: '配偶', age: 48, income: 300 }
+        ]
+      }
+    });
+    assert(res.ok, '创建家庭失败');
+    suspendedFamilyId = res.data.id;
+    const updateRes = await request('/api/families/' + suspendedFamilyId, {
+      method: 'PUT',
+      body: {
+        head_name: '暂停家庭户主',
+        address: '测试社区暂停楼',
+        income_source: '打零工',
+        subsidy_status: 'suspended',
+        last_review_conclusion: '收入超标，暂停发放',
+        members: [
+          { name: '暂停户主', relation: '户主', age: 50, income: 400 },
+          { name: '暂停配偶', relation: '配偶', age: 48, income: 300 }
+        ]
+      }
+    });
+    assert(updateRes.ok, '设置暂停状态失败');
+    console.log('       暂停家庭ID:', suspendedFamilyId);
+  })();
+
+  let appealId = null;
+  await test('提交异议申诉：暂停家庭可提交申诉，自动冻结本期补贴', async () => {
+    assert(suspendedFamilyId, '需要暂停状态家庭');
+    const res = await request('/api/appeals', {
+      method: 'POST',
+      body: {
+        family_id: suspendedFamilyId,
+        applicant_name: '申请人A',
+        reason: '家庭实际收入下降，对暂停决定有异议',
+        material_desc: '收入证明、医疗费用单据'
+      }
+    });
+    assert(res.ok, '提交申诉失败: ' + (res.data.error || ''));
+    appealId = res.data.id;
+    console.log('       申诉ID:', appealId);
+    console.log('       返回消息:', res.data.message);
+  })();
+
+  await test('申诉提交后本期补贴保持冻结状态', async () => {
+    assert(suspendedFamilyId, '需要家庭ID');
+    const period = new Date().toISOString().slice(0, 7);
+    const subsidies = await request('/api/subsidies');
+    const sub = subsidies.data.find(s => s.family_id == suspendedFamilyId && s.period === period);
+    assert(sub, '应生成补贴记录');
+    assertEqual(sub.status, 'frozen', '申诉期间补贴应为冻结状态');
+    assert(sub.frozen_reason && sub.frozen_reason.includes('申诉'), '冻结原因应包含申诉');
+    console.log('       补贴状态:', sub.status, '，冻结原因:', sub.frozen_reason);
+  })();
+
+  await test('申诉期间不能通过普通补贴发放绕过冻结', async () => {
+    assert(suspendedFamilyId, '需要家庭ID');
+    const period = new Date().toISOString().slice(0, 7);
+    const subsidies = await request('/api/subsidies');
+    const sub = subsidies.data.find(s => s.family_id == suspendedFamilyId && s.period === period);
+    assert(sub, '需要先有补贴记录');
+
+    const releaseRes = await request('/api/subsidies/' + sub.id + '/release', { method: 'PUT' });
+    assertEqual(releaseRes.status, 400, '申诉期间发放补贴应返回400');
+    assert(releaseRes.data.error && releaseRes.data.error.includes('申诉'), '错误信息应包含申诉: ' + (releaseRes.data.error || ''));
+    console.log('       服务器正确拒绝:', releaseRes.data.error);
+  })();
+
+  await test('复访校验1 - 照片缺失：不能提交复访', async () => {
+    assert(appealId, '需要申诉ID');
+    assert(suspendedFamilyId, '需要家庭ID');
+    const FormData = require('form-data');
+    const fd = new FormData();
+    fd.append('appeal_id', appealId);
+    fd.append('family_id', suspendedFamilyId);
+    fd.append('visitor_name', '网格员A');
+    fd.append('visit_date', new Date().toISOString().split('T')[0]);
+    fd.append('notes', '测试无照片复访');
+
+    const beforeCount = (await request('/api/revisits?appeal_id=' + appealId)).data.length;
+    const res = await request('/api/revisits', { method: 'POST', formData: fd });
+    const afterCount = (await request('/api/revisits?appeal_id=' + appealId)).data.length;
+
+    assertEqual(res.status, 400, '照片缺失应返回400');
+    assert(res.data.error && res.data.error.includes('照片'), '错误信息应包含照片');
+    assertEqual(afterCount, beforeCount, '照片缺失不应写入复访记录');
+    console.log('       服务器正确拒绝:', res.data.error);
+    console.log('       复访记录数: 提交前', beforeCount, '→ 提交后', afterCount, '(无变化)');
+  })();
+
+  await test('复访校验2 - 信息不完整家庭不能提交复访', async () => {
+    assert(incompleteFamilyId, '需要不完整家庭');
+    const appealRes = await request('/api/appeals', {
+      method: 'POST',
+      body: {
+        family_id: incompleteFamilyId,
+        applicant_name: '测试申请人',
+        reason: '测试用'
+      }
+    });
+    if (!appealRes.ok) {
+      console.log('       跳过：不完整家庭无法提交申诉');
+      return;
+    }
+    const testAppealId = appealRes.data.id;
+
+    const fd = makePhotoBuffer();
+    fd.append('appeal_id', testAppealId);
+    fd.append('family_id', incompleteFamilyId);
+    fd.append('visitor_name', '网格员A');
+    fd.append('visit_date', new Date().toISOString().split('T')[0]);
+
+    const res = await request('/api/revisits', { method: 'POST', formData: fd });
+    assertEqual(res.status, 400, '信息不完整应返回400');
+    assert(res.data.error && res.data.error.includes('信息不完整'), '错误信息应包含信息不完整');
+    console.log('       服务器正确拒绝:', res.data.error);
+  })();
+
+  let revisitId = null;
+  await test('网格员补充复访记录（有照片+信息完整）', async () => {
+    assert(appealId && suspendedFamilyId, '需要申诉和家庭');
+    const fd = makePhotoBuffer();
+    fd.append('appeal_id', appealId);
+    fd.append('family_id', suspendedFamilyId);
+    fd.append('visitor_name', '网格员A');
+    fd.append('visit_date', new Date().toISOString().split('T')[0]);
+    fd.append('income_change', '-200');
+    fd.append('notes', '复访确认家庭收入下降，生活困难');
+
+    const beforeCount = (await request('/api/revisits?appeal_id=' + appealId)).data.length;
+    const res = await request('/api/revisits', { method: 'POST', formData: fd });
+    const afterCount = (await request('/api/revisits?appeal_id=' + appealId)).data.length;
+
+    assert(res.ok, '复访提交失败: ' + (res.data.error || ''));
+    assert(res.data.id, '未返回复访ID');
+    assertEqual(afterCount, beforeCount + 1, '复访应写入记录');
+    revisitId = res.data.id;
+    console.log('       复访记录ID:', revisitId);
+    console.log('       复访记录数: 提交前', beforeCount, '→ 提交后', afterCount, '(+1)');
+  })();
+
+  await test('审核员审核申诉 - 恢复资格：家庭状态恢复、补贴解冻', async () => {
+    assert(appealId, '需要申诉ID');
+    const res = await request('/api/appeals/' + appealId + '/review', {
+      method: 'POST',
+      body: {
+        reviewer_name: '审核员A',
+        decision: 'restore',
+        reason: '复访确认收入下降，符合条件，恢复资格'
+      }
+    });
+    assert(res.ok, '申诉审核失败: ' + (res.data.error || ''));
+    assertEqual(res.data.decision, 'restore', '审核决定应为restore');
+
+    const family = await request('/api/families/' + suspendedFamilyId);
+    assertEqual(family.data.subsidy_status, 'active', '家庭状态应恢复为active');
+    console.log('       家庭状态:', family.data.subsidy_status, '(应为: active)');
+
+    const period = new Date().toISOString().slice(0, 7);
+    const subsidies = await request('/api/subsidies');
+    const sub = subsidies.data.find(s => s.family_id == suspendedFamilyId && s.period === period);
+    if (sub) {
+      console.log('       补贴状态:', sub.status, '(恢复后状态)');
+    }
+  })();
+
+  let appealForRecoveryId = null;
+  await test('创建另一个申诉用于"启动追回"测试', async () => {
+    assert(cancelledFamilyId, '需要已取消家庭');
+    const res = await request('/api/appeals', {
+      method: 'POST',
+      body: {
+        family_id: cancelledFamilyId,
+        applicant_name: '申请人B',
+        reason: '对取消资格有异议，请求复核'
+      }
+    });
+    assert(res.ok, '提交申诉失败');
+    appealForRecoveryId = res.data.id;
+    console.log('       追回测试申诉ID:', appealForRecoveryId);
+  })();
+
+  await test('审核员审核申诉 - 启动追回：审核决定为recover', async () => {
+    assert(appealForRecoveryId, '需要申诉ID');
+    const res = await request('/api/appeals/' + appealForRecoveryId + '/review', {
+      method: 'POST',
+      body: {
+        reviewer_name: '审核员A',
+        decision: 'recover',
+        reason: '申诉不成立，维持取消资格，启动补贴追回'
+      }
+    });
+    assert(res.ok, '申诉审核失败: ' + (res.data.error || ''));
+    assertEqual(res.data.decision, 'recover', '审核决定应为recover');
+    console.log('       申诉审核决定: recover (启动追回)');
+  })();
+
+  await test('追回金额计算：已发放月份+冻结期+困难说明', async () => {
+    assert(cancelledFamilyId, '需要家庭ID');
+    const res = await request('/api/recoveries/calculate', {
+      method: 'POST',
+      body: {
+        family_id: cancelledFamilyId,
+        months_issued: 6,
+        monthly_amount: 500,
+        freeze_months: 2,
+        hardship_desc: '家庭有重病患者，生活困难'
+      }
+    });
+    assert(res.ok, '计算失败: ' + (res.data.error || ''));
+    assert(typeof res.data.total_amount === 'number', '应返回追回金额');
+    assert(res.data.total_amount > 0, '追回金额应大于0');
+
+    const base = 6 * 500;
+    const freezeDed = 2 * 500 * 0.5;
+    const expected = Math.round((base - freezeDed) * 0.8 * 100) / 100;
+    assertEqual(res.data.total_amount, expected, '追回金额计算不正确');
+
+    console.log('       基础金额:', base, '元 (6月 × 500元)');
+    console.log('       冻结期扣减:', freezeDed, '元 (2月 × 500元 × 50%)');
+    console.log('       困难减免(20%):', Math.round((base - freezeDed) * 0.2 * 100) / 100, '元');
+    console.log('       追回总计:', res.data.total_amount, '元');
+    console.log('       计算详情:', res.data.calculation_detail);
+  })();
+
+  let recoveryId = null;
+  await test('生成追回记录（含分期备注）', async () => {
+    assert(cancelledFamilyId, '需要家庭ID');
+    const res = await request('/api/recoveries', {
+      method: 'POST',
+      body: {
+        family_id: cancelledFamilyId,
+        appeal_id: appealForRecoveryId,
+        months_issued: 6,
+        monthly_amount: 500,
+        freeze_months: 2,
+        hardship_desc: '家庭有重病患者，生活困难',
+        installment_note: '分3期偿还，每月600元，共1800元'
+      }
+    });
+    assert(res.ok, '生成追回失败: ' + (res.data.error || ''));
+    assert(res.data.id, '未返回追回ID');
+    assert(typeof res.data.total_amount === 'number', '应返回追回金额');
+    recoveryId = res.data.id;
+    console.log('       追回记录ID:', recoveryId);
+    console.log('       追回金额:', res.data.total_amount, '元');
+  })();
+
+  await test('追回记录审核确认', async () => {
+    assert(recoveryId, '需要追回记录ID');
+    const res = await request('/api/recoveries/' + recoveryId + '/review', {
+      method: 'POST',
+      body: {
+        reviewer_name: '审核员A',
+        approved: true,
+        reason: '情况属实，同意分期追回'
+      }
+    });
+    assert(res.ok, '审核失败: ' + (res.data.error || ''));
+
+    const recoveries = await request('/api/recoveries');
+    const rec = recoveries.data.find(r => r.id === recoveryId);
+    assert(rec, '应能查询到追回记录');
+    assertEqual(rec.status, 'approved', '追回状态应为approved');
+    console.log('       追回状态:', rec.status, '(应为: approved)');
+  })();
+
+  await test('已取消资格家庭不能直接生成补贴，须先通过恢复申请', async () => {
+    assert(cancelledFamilyId, '需要已取消资格家庭');
+    const period = '2025-06';
+    const res = await request('/api/subsidies', {
+      method: 'POST',
+      body: {
+        family_id: cancelledFamilyId,
+        period: period,
+        amount: 500
+      }
+    });
+    assertEqual(res.status, 400, '应返回400状态码');
+    assert(res.data.error && (res.data.error.includes('已取消') || res.data.error.includes('恢复申请')),
+      '错误信息应提示取消资格与恢复申请: ' + (res.data.error || ''));
+    console.log('       服务器正确拒绝:', res.data.error);
+  })();
+
+  let restorationId = null;
+  await test('已取消家庭可发起资格恢复申请', async () => {
+    assert(cancelledFamilyId);
+    const res = await request('/api/restorations', {
+      method: 'POST',
+      body: {
+        family_id: cancelledFamilyId,
+        applicant_name: '申请人C',
+        reason: '家庭收入显著下降，符合低保条件，申请恢复资格'
+      }
+    });
+    assert(res.ok, '申请失败: ' + (res.data.error || ''));
+    assert(res.data.id, '未返回申请ID');
+    restorationId = res.data.id;
+    console.log('       资格恢复申请ID:', restorationId);
+  })();
+
+  await test('资格恢复申请审核通过后，家庭状态恢复正常', async () => {
+    assert(restorationId, '需要恢复申请ID');
+    const res = await request('/api/restorations/' + restorationId + '/review', {
+      method: 'POST',
+      body: {
+        reviewer_name: '审核员A',
+        approved: true,
+        reason: '经审核，家庭符合低保条件，同意恢复资格'
+      }
+    });
+    assert(res.ok, '审核失败: ' + (res.data.error || ''));
+
+    const family = await request('/api/families/' + cancelledFamilyId);
+    assertEqual(family.data.subsidy_status, 'active', '家庭状态应恢复为active');
+    console.log('       家庭状态恢复为:', family.data.subsidy_status);
+  })();
+
+  await test('恢复资格后的家庭可以正常生成补贴', async () => {
+    assert(cancelledFamilyId, '需要家庭ID');
+    const period = '2025-07';
+    const res = await request('/api/subsidies', {
+      method: 'POST',
+      body: {
+        family_id: cancelledFamilyId,
+        period: period,
+        amount: 500
+      }
+    });
+    assert(res.ok, '生成补贴失败: ' + (res.data.error || ''));
+    console.log('       补贴生成成功，状态:', res.data.status);
+  })();
+
+  await test('获取申诉列表（含复访记录）', async () => {
+    const res = await request('/api/appeals');
+    assert(res.ok);
+    assert(Array.isArray(res.data));
+    console.log('       申诉记录数:', res.data.length);
+    if (res.data.length > 0) {
+      const a = res.data[0];
+      console.log('       首条申诉: #', a.id, a.head_name, '-', getAppealStatusText(a.status));
+    }
+  })();
+
+  await test('获取追回记录列表', async () => {
+    const res = await request('/api/recoveries');
+    assert(res.ok);
+    assert(Array.isArray(res.data));
+    console.log('       追回记录数:', res.data.length);
   })();
 
   console.log('\n' + '='.repeat(60));

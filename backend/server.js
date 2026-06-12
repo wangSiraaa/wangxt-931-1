@@ -296,7 +296,15 @@ app.post('/api/subsidies', (req, res) => {
   if (!family) return res.status(404).json({ error: '家庭档案不存在' });
 
   if (family.subsidy_status === 'cancelled') {
-    return res.status(400).json({ error: '该家庭已取消低保资格，不能生成补贴' });
+    return res.status(400).json({ error: '该家庭已取消低保资格，不能生成补贴，须先通过恢复申请' });
+  }
+
+  const activeAppeal = getOne(
+    "SELECT * FROM appeals WHERE family_id = ? AND status = 'pending'",
+    family_id
+  );
+  if (activeAppeal) {
+    return res.status(400).json({ error: '该家庭存在异议申诉中，本期补贴保持冻结，不能被普通审核绕过' });
   }
 
   const existing = getOne('SELECT * FROM subsidies WHERE family_id = ? AND period = ?', family_id, period);
@@ -330,6 +338,22 @@ app.put('/api/subsidies/:id/release', (req, res) => {
   if (sub.status !== 'frozen' && sub.status !== 'pending') {
     return res.status(400).json({ error: '当前状态不能发放' });
   }
+
+  const family = getOne('SELECT * FROM families WHERE id = ?', sub.family_id);
+  if (!family) return res.status(404).json({ error: '家庭档案不存在' });
+
+  if (family.subsidy_status === 'cancelled') {
+    return res.status(400).json({ error: '该家庭已取消低保资格，不能发放补贴，须先通过恢复申请' });
+  }
+
+  const activeAppeal = getOne(
+    "SELECT * FROM appeals WHERE family_id = ? AND status = 'pending'",
+    sub.family_id
+  );
+  if (activeAppeal) {
+    return res.status(400).json({ error: '该家庭存在异议申诉中，本期补贴保持冻结，不能被普通审核绕过' });
+  }
+
   run("UPDATE subsidies SET status = 'released' WHERE id = ?", req.params.id);
   res.json({ message: '补贴已发放' });
 });
@@ -385,6 +409,246 @@ app.post('/api/restorations/:id/review', (req, res) => {
     }
   });
   res.json({ message: '审核完成' });
+});
+
+// ==================== 异议申诉 API ====================
+
+app.get('/api/appeals', (req, res) => {
+  const rows = getAll(`
+    SELECT a.*, f.family_code, f.head_name, f.subsidy_status as family_status
+    FROM appeals a 
+    JOIN families f ON a.family_id = f.id
+    ORDER BY a.created_at DESC
+  `);
+  for (const a of rows) {
+    a.revisits = getAll('SELECT * FROM revisits WHERE appeal_id = ?', a.id);
+  }
+  res.json(rows);
+});
+
+app.get('/api/appeals/:id', (req, res) => {
+  const appeal = getOne('SELECT * FROM appeals WHERE id = ?', req.params.id);
+  if (!appeal) return res.status(404).json({ error: '申诉不存在' });
+  const family = getOne('SELECT * FROM families WHERE id = ?', appeal.family_id);
+  appeal.family = family;
+  appeal.revisits = getAll('SELECT * FROM revisits WHERE appeal_id = ?', appeal.id);
+  const recovery = getOne('SELECT * FROM recoveries WHERE appeal_id = ?', appeal.id);
+  appeal.recovery = recovery;
+  res.json(appeal);
+});
+
+app.post('/api/appeals', (req, res) => {
+  const { family_id, applicant_name, reason, material_desc } = req.body;
+  if (!family_id || !applicant_name || !reason) {
+    return res.status(400).json({ error: '申诉信息不完整' });
+  }
+  const family = getOne('SELECT * FROM families WHERE id = ?', family_id);
+  if (!family) return res.status(404).json({ error: '家庭档案不存在' });
+  if (family.subsidy_status !== 'suspended' && family.subsidy_status !== 'cancelled' && family.subsidy_status !== 'review') {
+    return res.status(400).json({ error: '只有暂停、取消或复核中的家庭才能提交异议申诉' });
+  }
+
+  try {
+    transaction(() => {
+      const info = run(`
+        INSERT INTO appeals (family_id, applicant_name, reason, material_desc, status)
+        VALUES (?, ?, ?, ?, 'pending')
+      `, family_id, applicant_name, reason, material_desc || null);
+
+      const period = new Date().toISOString().slice(0, 7);
+      const existing = getOne('SELECT * FROM subsidies WHERE family_id = ? AND period = ?', family_id, period);
+      if (existing && existing.status !== 'frozen') {
+        run('UPDATE subsidies SET status = ?, frozen_reason = ? WHERE id = ?',
+          'frozen', '异议申诉中，补贴冻结', existing.id);
+      } else if (!existing) {
+        run(`
+          INSERT INTO subsidies (family_id, period, amount, status, frozen_reason)
+          VALUES (?, ?, ?, 'frozen', '异议申诉中，补贴冻结')
+        `, family_id, period, 0);
+      }
+
+      res.json({ id: info.lastInsertRowid, message: '异议申诉已提交，本期补贴保持冻结' });
+    });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/appeals/:id/review', (req, res) => {
+  const { reviewer_name, decision, reason } = req.body;
+  if (!reviewer_name || !decision) {
+    return res.status(400).json({ error: '审核信息不完整' });
+  }
+  if (!['restore', 'maintain', 'recover'].includes(decision)) {
+    return res.status(400).json({ error: '审核决定无效，须为 restore/maintain/recover' });
+  }
+
+  const appeal = getOne('SELECT * FROM appeals WHERE id = ?', req.params.id);
+  if (!appeal) return res.status(404).json({ error: '申诉不存在' });
+  if (appeal.status !== 'pending') return res.status(400).json({ error: '该申诉已审核' });
+
+  try {
+    transaction(() => {
+      run(`
+        UPDATE appeals SET status = 'reviewed', reviewer_name = ?, review_decision = ?, review_reason = ?, reviewed_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `, reviewer_name, decision, reason || null, req.params.id);
+
+      if (decision === 'restore') {
+        run(`
+          UPDATE families SET subsidy_status = 'active', last_review_conclusion = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `, reason || '异议申诉通过，恢复资格', appeal.family_id);
+        const period = new Date().toISOString().slice(0, 7);
+        const sub = getOne('SELECT * FROM subsidies WHERE family_id = ? AND period = ?', appeal.family_id, period);
+        if (sub && sub.status === 'frozen') {
+          run('UPDATE subsidies SET status = ?, frozen_reason = NULL WHERE id = ?', 'pending', sub.id);
+        }
+      } else if (decision === 'maintain') {
+        run(`
+          UPDATE families SET last_review_conclusion = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `, reason || '异议申诉驳回，维持原决定', appeal.family_id);
+      } else if (decision === 'recover') {
+        run(`
+          UPDATE families SET last_review_conclusion = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `, reason || '异议申诉审核，启动补贴追回', appeal.family_id);
+      }
+    });
+    res.json({ message: '申诉审核完成', decision });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// ==================== 复访记录 API ====================
+
+app.post('/api/revisits', upload.single('photo'), (req, res) => {
+  const { appeal_id, family_id, visitor_name, visit_date, location, income_change, notes } = req.body;
+
+  if (!appeal_id || !family_id || !visitor_name || !visit_date) {
+    return res.status(400).json({ error: '复访信息不完整' });
+  }
+  if (!req.file) {
+    return res.status(400).json({ error: '走访照片为必填项，照片缺失不能提交复访' });
+  }
+
+  const appeal = getOne('SELECT * FROM appeals WHERE id = ?', appeal_id);
+  if (!appeal) return res.status(404).json({ error: '申诉不存在' });
+  if (appeal.status !== 'pending') return res.status(400).json({ error: '申诉已审核，不能再提交复访' });
+
+  if (!isFamilyInfoComplete(family_id)) {
+    return res.status(400).json({ error: '家庭成员信息不完整，不能提交复访记录' });
+  }
+
+  const photo_path = req.file.filename;
+  const info = run(`
+    INSERT INTO revisits (appeal_id, family_id, visitor_name, visit_date, location, income_change, notes, photo_path, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'submitted')
+  `, appeal_id, family_id, visitor_name, visit_date, location || null,
+       income_change || 0, notes || null, photo_path);
+
+  res.json({ id: info.lastInsertRowid, message: '复访记录提交成功' });
+});
+
+app.get('/api/revisits', (req, res) => {
+  const { appeal_id } = req.query;
+  let sql = `
+    SELECT rv.*, f.family_code, f.head_name
+    FROM revisits rv 
+    JOIN families f ON rv.family_id = f.id
+  `;
+  const params = [];
+  if (appeal_id) {
+    sql += ' WHERE rv.appeal_id = ?';
+    params.push(appeal_id);
+  }
+  sql += ' ORDER BY rv.created_at DESC';
+  const rows = getAll(sql, ...params);
+  res.json(rows);
+});
+
+// ==================== 补贴追回 API ====================
+
+app.get('/api/recoveries', (req, res) => {
+  const rows = getAll(`
+    SELECT rc.*, f.family_code, f.head_name
+    FROM recoveries rc 
+    JOIN families f ON rc.family_id = f.id
+    ORDER BY rc.created_at DESC
+  `);
+  res.json(rows);
+});
+
+app.post('/api/recoveries/calculate', (req, res) => {
+  const { family_id, months_issued, monthly_amount, freeze_months, hardship_desc } = req.body;
+  if (!family_id || months_issued == null || monthly_amount == null) {
+    return res.status(400).json({ error: '追回计算参数不完整' });
+  }
+  const base = months_issued * monthly_amount;
+  const freezeDeduction = (freeze_months || 0) * monthly_amount * 0.5;
+  let total = base - freezeDeduction;
+  if (hardship_desc && hardship_desc.trim().length > 0) {
+    total = total * 0.8;
+  }
+  if (total < 0) total = 0;
+  total = Math.round(total * 100) / 100;
+  res.json({
+    base_amount: base,
+    freeze_deduction: freezeDeduction,
+    hardship_reduction: hardship_desc ? base * 0.2 : 0,
+    total_amount: total,
+    calculation_detail: `已发放${months_issued}月 × ${monthly_amount}元 = ${base}元` +
+      (freezeDeduction > 0 ? `，冻结期${freeze_months}月扣减${freezeDeduction}元` : '') +
+      (hardship_desc ? `，困难说明扣减20%(${Math.round(base * 0.2 * 100) / 100}元)` : '') +
+      `，追回金额：${total}元`
+  });
+});
+
+app.post('/api/recoveries', (req, res) => {
+  const { family_id, appeal_id, months_issued, monthly_amount, freeze_months, hardship_desc, installment_note } = req.body;
+  if (!family_id || months_issued == null || monthly_amount == null) {
+    return res.status(400).json({ error: '追回信息不完整' });
+  }
+
+  const family = getOne('SELECT * FROM families WHERE id = ?', family_id);
+  if (!family) return res.status(404).json({ error: '家庭档案不存在' });
+
+  const base = months_issued * monthly_amount;
+  const freezeDeduction = (freeze_months || 0) * monthly_amount * 0.5;
+  let total = base - freezeDeduction;
+  if (hardship_desc && hardship_desc.trim().length > 0) {
+    total = total * 0.8;
+  }
+  if (total < 0) total = 0;
+  total = Math.round(total * 100) / 100;
+
+  const info = run(`
+    INSERT INTO recoveries (family_id, appeal_id, months_issued, monthly_amount, freeze_months, hardship_desc, total_amount, installment_note, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+  `, family_id, appeal_id || null, months_issued, monthly_amount, freeze_months || 0,
+       hardship_desc || null, total, installment_note || null);
+
+  res.json({ id: info.lastInsertRowid, total_amount: total, message: '追回记录已生成' });
+});
+
+app.post('/api/recoveries/:id/review', (req, res) => {
+  const { reviewer_name, approved, reason } = req.body;
+  if (!reviewer_name) {
+    return res.status(400).json({ error: '审核人不能为空' });
+  }
+  const recovery = getOne('SELECT * FROM recoveries WHERE id = ?', req.params.id);
+  if (!recovery) return res.status(404).json({ error: '追回记录不存在' });
+  if (recovery.status !== 'pending') return res.status(400).json({ error: '该追回已审核' });
+
+  const status = approved ? 'approved' : 'rejected';
+  run(`
+    UPDATE recoveries SET status = ?, reviewer_name = ?, review_reason = ?, reviewed_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `, status, reviewer_name, reason || null, req.params.id);
+
+  res.json({ message: approved ? '追回已确认' : '追回已驳回' });
 });
 
 // ==================== 配置 API ====================

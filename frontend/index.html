@@ -27,6 +27,7 @@
       <button class="nav-btn" data-page="reviews">✅ 审核审批</button>
       <button class="nav-btn" data-page="subsidies">💰 补贴发放</button>
       <button class="nav-btn" data-page="restorations">🔄 资格恢复</button>
+      <button class="nav-btn" data-page="appeals">⚖️ 异议申诉与追回</button>
     </nav>
 
     <main class="app-main">
@@ -78,6 +79,23 @@
           <button class="btn btn-primary" id="btnAddRestoration">📝 发起恢复申请</button>
         </div>
         <div id="restorationList" class="data-list"></div>
+      </section>
+
+      <!-- 异议申诉与追回页 -->
+      <section id="page-appeals" class="page">
+        <div class="page-header">
+          <h2>异议申诉与补贴追回</h2>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-primary" id="btnAddAppeal">📝 提交异议申诉</button>
+            <button class="btn btn-secondary" id="btnAddRecovery">💸 新建追回</button>
+          </div>
+        </div>
+        <div class="tabs">
+          <button class="tab-btn active" data-tab="appealsList">申诉记录</button>
+          <button class="tab-btn" data-tab="recoveriesList">追回记录</button>
+        </div>
+        <div id="appealsList" class="tab-content active"></div>
+        <div id="recoveriesList" class="tab-content"></div>
       </section>
     </main>
   </div>
@@ -288,6 +306,175 @@
       <div class="modal-footer">
         <button class="btn btn-secondary" onclick="closeModal('restorationModal')">取消</button>
         <button class="btn btn-primary" onclick="saveRestoration()">提交申请</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 异议申诉弹窗 -->
+  <div id="appealModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>提交异议申诉</h3>
+        <span class="close" onclick="closeModal('appealModal')">&times;</span>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-warning" id="appealAlert" style="display:none;"></div>
+        <form id="appealForm">
+          <div class="form-grid">
+            <div class="form-item">
+              <label>选择家庭 *</label>
+              <select name="family_id" id="appealFamilyId" required></select>
+            </div>
+            <div class="form-item">
+              <label>申请人 *</label>
+              <input type="text" name="applicant_name" required>
+            </div>
+          </div>
+          <div class="form-item">
+            <label>申诉理由 *</label>
+            <textarea name="reason" rows="4" required placeholder="详细说明异议原因"></textarea>
+          </div>
+          <div class="form-item">
+            <label>异议材料描述</label>
+            <textarea name="material_desc" rows="3" placeholder="如：收入证明、医疗单据等"></textarea>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('appealModal')">取消</button>
+        <button class="btn btn-primary" onclick="saveAppeal()">提交申诉</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 申诉审核弹窗 -->
+  <div id="appealReviewModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>审核异议申诉</h3>
+        <span class="close" onclick="closeModal('appealReviewModal')">&times;</span>
+      </div>
+      <div class="modal-body">
+        <div id="appealReviewInfo" class="info-panel"></div>
+        <form id="appealReviewForm">
+          <div class="form-item">
+            <label>审核决定 *</label>
+            <select name="decision" required>
+              <option value="">请选择</option>
+              <option value="restore">恢复资格</option>
+              <option value="maintain">维持暂停/取消</option>
+              <option value="recover">启动补贴追回</option>
+            </select>
+          </div>
+          <div class="form-item">
+            <label>审核说明</label>
+            <textarea name="reason" rows="3"></textarea>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('appealReviewModal')">取消</button>
+        <button class="btn btn-primary" onclick="submitAppealReview()">提交审核</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 复访弹窗 -->
+  <div id="revisitModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>补充复访记录</h3>
+        <span class="close" onclick="closeModal('revisitModal')">&times;</span>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-warning" id="revisitAlert" style="display:none;"></div>
+        <form id="revisitForm">
+          <input type="hidden" name="family_id" id="revisitFamilyId">
+          <div class="form-grid">
+            <div class="form-item">
+              <label>关联申诉 *</label>
+              <select name="appeal_id" id="revisitAppealId" required></select>
+            </div>
+            <div class="form-item">
+              <label>走访人 *</label>
+              <input type="text" name="visitor_name" id="revisitVisitor" required>
+            </div>
+            <div class="form-item">
+              <label>走访日期 *</label>
+              <input type="date" name="visit_date" required>
+            </div>
+            <div class="form-item">
+              <label>走访地点</label>
+              <input type="text" name="location">
+            </div>
+            <div class="form-item">
+              <label>收入变化(元)</label>
+              <input type="number" name="income_change" value="0" step="any">
+            </div>
+            <div class="form-item">
+              <label>走访照片 <span class="required">*</span></label>
+              <input type="file" name="photo" accept="image/*" id="revisitPhoto" required>
+            </div>
+          </div>
+          <div class="form-item">
+            <label>走访备注</label>
+            <textarea name="notes" rows="3"></textarea>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('revisitModal')">取消</button>
+        <button class="btn btn-primary" onclick="saveRevisit()">提交复访</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 追回弹窗 -->
+  <div id="recoveryModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>新建补贴追回</h3>
+        <span class="close" onclick="closeModal('recoveryModal')">&times;</span>
+      </div>
+      <div class="modal-body">
+        <div id="recoveryCalcResult" class="info-panel" style="display:none;"></div>
+        <form id="recoveryForm">
+          <div class="form-grid">
+            <div class="form-item">
+              <label>选择家庭 *</label>
+              <select name="family_id" id="recoveryFamilyId" required></select>
+            </div>
+            <div class="form-item">
+              <label>关联申诉</label>
+              <select name="appeal_id" id="recoveryAppealId"></select>
+            </div>
+            <div class="form-item">
+              <label>已发放月数 *</label>
+              <input type="number" name="months_issued" min="1" required>
+            </div>
+            <div class="form-item">
+              <label>每月补贴金额(元) *</label>
+              <input type="number" name="monthly_amount" value="500" step="any" required>
+            </div>
+            <div class="form-item">
+              <label>冻结月数</label>
+              <input type="number" name="freeze_months" value="0" min="0">
+            </div>
+          </div>
+          <div class="form-item">
+            <label>家庭困难说明</label>
+            <textarea name="hardship_desc" rows="3" placeholder="如有困难说明，追回金额将扣减20%"></textarea>
+          </div>
+          <div class="form-item">
+            <label>分期备注</label>
+            <textarea name="installment_note" rows="2" placeholder="如：分3期偿还，每月XXX元"></textarea>
+          </div>
+          <button type="button" class="btn btn-secondary" onclick="calculateRecovery()" style="margin-top:10px;">🧮 预算追回金额</button>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('recoveryModal')">取消</button>
+        <button class="btn btn-primary" onclick="saveRecovery()">确认生成追回</button>
       </div>
     </div>
   </div>

@@ -34,6 +34,8 @@ function initNavigation() {
   document.getElementById('btnAddVisit').addEventListener('click', () => openVisitModal());
   document.getElementById('btnAddSubsidy').addEventListener('click', () => openSubsidyModal());
   document.getElementById('btnAddRestoration').addEventListener('click', () => openRestorationModal());
+  document.getElementById('btnAddAppeal').addEventListener('click', () => openAppealModal());
+  document.getElementById('btnAddRecovery').addEventListener('click', () => openRecoveryModal());
 }
 
 function setDefaultOperator() {
@@ -90,6 +92,8 @@ function refreshAll() {
   loadReviewHistory();
   loadSubsidies();
   loadRestorations();
+  loadAppeals();
+  loadRecoveries();
 }
 
 // ==================== 家庭档案 ====================
@@ -643,4 +647,467 @@ function getDecisionText(d) {
 function getSubsidyStatus(s) {
   const map = { pending: '待发放', frozen: '已冻结', released: '已发放', suspended: '已暂停' };
   return map[s] || s;
+}
+
+// ==================== Tab 切换（申诉与追回页） ====================
+
+document.addEventListener('DOMContentLoaded', () => {
+  const appealPageTabs = document.querySelectorAll('#page-appeals .tab-btn');
+  appealPageTabs.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const tab = btn.dataset.tab;
+      document.querySelectorAll('#page-appeals .tab-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      document.querySelectorAll('#page-appeals .tab-content').forEach(c => c.classList.remove('active'));
+      document.getElementById(tab).classList.add('active');
+    });
+  });
+});
+
+// ==================== 异议申诉 ====================
+
+let currentAppealId = null;
+
+async function loadAppeals() {
+  try {
+    const appeals = await api('/api/appeals');
+    const container = document.getElementById('appealsList');
+    if (appeals.length === 0) {
+      container.innerHTML = '<div class="empty-state"><div class="icon">⚖️</div><p>暂无异议申诉记录</p></div>';
+      return;
+    }
+    container.innerHTML = appeals.map(a => `
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">
+              ${a.head_name}（${a.family_code}）
+              <span class="status-tag status-${a.status}">${getAppealStatus(a.status)}</span>
+            </div>
+            <div class="card-subtitle">申请人：${a.applicant_name} | ${a.created_at}</div>
+          </div>
+          <div class="card-actions">
+            ${a.status === 'pending' ? `
+              <button class="btn btn-sm btn-secondary" onclick="openRevisitModalForAppeal(${a.id})">补充复访</button>
+              <button class="btn btn-sm btn-primary" onclick="openAppealReviewModal(${a.id})">审核</button>
+            ` : ''}
+            <button class="btn btn-sm btn-secondary" onclick="viewAppealDetail(${a.id})">详情</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="info-item"><span class="label">申诉理由：</span><span class="value">${a.reason}</span></div>
+          ${a.material_desc ? `<div class="info-item"><span class="label">异议材料：</span><span class="value">${a.material_desc}</span></div>` : ''}
+          <div class="info-item"><span class="label">家庭状态：</span><span class="value"><span class="status-tag status-${a.family_status}">${getStatusText(a.family_status)}</span></span></div>
+          ${a.review_decision ? `
+            <div class="info-item"><span class="label">审核决定：</span><span class="value">${getAppealDecision(a.review_decision)}</span></div>
+            <div class="info-item"><span class="label">审核人：</span><span class="value">${a.reviewer_name || '-'}</span></div>
+            ${a.review_reason ? `<div class="info-item" style="grid-column:1/-1;"><span class="label">审核说明：</span><span class="value">${a.review_reason}</span></div>` : ''}
+          ` : ''}
+          ${a.revisits && a.revisits.length > 0 ? `
+            <div class="info-item" style="grid-column:1/-1;">
+              <span class="label">复访记录：</span>
+              <span class="value">共 ${a.revisits.length} 条</span>
+            </div>
+          ` : ''}
+        </div>
+      </div>
+    `).join('');
+  } catch (e) {}
+}
+
+function getAppealStatus(s) {
+  const map = { pending: '待审核', reviewed: '已审核' };
+  return map[s] || s;
+}
+
+function getAppealDecision(d) {
+  const map = { restore: '恢复资格', maintain: '维持原决定', recover: '启动追回' };
+  return map[d] || d;
+}
+
+async function viewAppealDetail(id) {
+  try {
+    const a = await api('/api/appeals/' + id);
+    let detail = `
+异议申诉详情
+================
+编号：${a.id}
+家庭：${a.family.head_name}（${a.family.family_code}）
+家庭状态：${getStatusText(a.family.subsidy_status)}
+申请人：${a.applicant_name}
+申诉时间：${a.created_at}
+状态：${getAppealStatus(a.status)}
+申诉理由：${a.reason}
+${a.material_desc ? '异议材料：' + a.material_desc : ''}
+
+${a.revisits && a.revisits.length > 0 ? `复访记录（${a.revisits.length}条）：
+${a.revisits.map(r => `  · ${r.visit_date} - ${r.visitor_name}
+    备注：${r.notes || '无'}
+    收入变化：${r.income_change > 0 ? '+' : ''}${r.income_change}元
+    照片：${r.photo_path ? '✅已上传' : '❌未上传'}`).join('\n')}
+` : '复访记录：无'}
+
+${a.review_decision ? `审核结果：
+  决定：${getAppealDecision(a.review_decision)}
+  审核人：${a.reviewer_name}
+  时间：${a.reviewed_at || '-'}
+  ${a.review_reason ? '说明：' + a.review_reason : ''}
+` : '审核结果：未审核'}
+
+${a.recovery ? `追回记录：
+  追回金额：${a.recovery.total_amount} 元
+  已发放月数：${a.recovery.months_issued} 月
+  每月金额：${a.recovery.monthly_amount} 元
+  冻结月数：${a.recovery.freeze_months || 0} 月
+  ${a.recovery.hardship_desc ? '困难说明：' + a.recovery.hardship_desc : ''}
+  ${a.recovery.installment_note ? '分期备注：' + a.recovery.installment_note : ''}
+  状态：${a.recovery.status === 'pending' ? '待审核' : a.recovery.status === 'approved' ? '已确认' : '已驳回'}
+` : ''}
+    `;
+    alert(detail);
+  } catch (e) {}
+}
+
+async function openAppealModal() {
+  document.getElementById('appealForm').reset();
+  document.getElementById('appealAlert').style.display = 'none';
+
+  try {
+    const families = await api('/api/families');
+    const eligible = families.filter(f =>
+      f.subsidy_status === 'suspended' || f.subsidy_status === 'cancelled' || f.subsidy_status === 'review'
+    );
+    const select = document.getElementById('appealFamilyId');
+    select.innerHTML = '<option value="">请选择家庭</option>' +
+      eligible.map(f => `<option value="${f.id}">${f.family_code} - ${f.head_name} [${getStatusText(f.subsidy_status)}]</option>`).join('');
+    if (eligible.length === 0) {
+      showToast('当前没有可申诉的家庭（需为暂停/取消/复核中状态）', 'info');
+    }
+  } catch (e) { return; }
+
+  document.getElementById('appealModal').classList.add('active');
+}
+
+async function saveAppeal() {
+  const form = document.getElementById('appealForm');
+  const alertEl = document.getElementById('appealAlert');
+
+  if (!form.family_id.value || !form.applicant_name.value || !form.reason.value) {
+    alertEl.textContent = '❌ 请填写必填项';
+    alertEl.style.display = 'block';
+    alertEl.className = 'alert alert-error';
+    return;
+  }
+
+  try {
+    await api('/api/appeals', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        family_id: form.family_id.value,
+        applicant_name: form.applicant_name.value,
+        reason: form.reason.value,
+        material_desc: form.material_desc.value
+      })
+    });
+    showToast('异议申诉已提交，本期补贴保持冻结');
+    closeModal('appealModal');
+    loadAppeals();
+    loadSubsidies();
+    loadFamilies();
+  } catch (e) {
+    alertEl.textContent = '❌ ' + e.message;
+    alertEl.style.display = 'block';
+    alertEl.className = 'alert alert-error';
+  }
+}
+
+async function openAppealReviewModal(id) {
+  currentAppealId = id;
+  document.getElementById('appealReviewForm').reset();
+  try {
+    const appeal = await api('/api/appeals/' + id);
+    const family = appeal.family;
+    document.getElementById('appealReviewInfo').innerHTML = `
+      <h4>申诉信息</h4>
+      <div class="info-grid">
+        <div><strong>${family.head_name}</strong>（${family.family_code}）</div>
+        <div>家庭状态：<span class="status-tag status-${family.subsidy_status}">${getStatusText(family.subsidy_status)}</span></div>
+        <div>申请人：${appeal.applicant_name}</div>
+        <div>申诉时间：${appeal.created_at}</div>
+      </div>
+      <div style="margin-top:10px;">
+        <strong>申诉理由：</strong>${appeal.reason}
+      </div>
+      ${appeal.material_desc ? `<div style="margin-top:5px;"><strong>异议材料：</strong>${appeal.material_desc}</div>` : ''}
+      ${appeal.revisits && appeal.revisits.length > 0 ? `
+        <div style="margin-top:10px;">
+          <strong>复访记录：</strong>共 ${appeal.revisits.length} 条
+          ${appeal.revisits.map(r => `<div style="margin-left:10px;font-size:13px;color:#666;">
+            · ${r.visit_date} - ${r.visitor_name} | 收入变化：${r.income_change > 0 ? '+' : ''}${r.income_change}元
+            ${r.notes ? '<br>备注：' + r.notes : ''}
+          </div>`).join('')}
+        </div>
+      ` : ''}
+    `;
+  } catch (e) { return; }
+  document.getElementById('appealReviewModal').classList.add('active');
+}
+
+async function submitAppealReview() {
+  const form = document.getElementById('appealReviewForm');
+  if (!form.decision.value) {
+    showToast('请选择审核决定', 'error');
+    return;
+  }
+  try {
+    await api('/api/appeals/' + currentAppealId + '/review', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reviewer_name: document.getElementById('operatorName').value,
+        decision: form.decision.value,
+        reason: form.reason.value
+      })
+    });
+    showToast('申诉审核完成');
+    closeModal('appealReviewModal');
+    loadAppeals();
+    loadFamilies();
+    loadSubsidies();
+    loadRecoveries();
+  } catch (e) {}
+}
+
+// ==================== 复访记录 ====================
+
+async function openRevisitModalForAppeal(appealId) {
+  document.getElementById('revisitForm').reset();
+  document.getElementById('revisitAlert').style.display = 'none';
+  document.getElementById('revisitVisitor').value = document.getElementById('operatorName').value;
+  document.querySelector('#revisitForm input[name=visit_date]').value = new Date().toISOString().split('T')[0];
+
+  try {
+    const appeals = await api('/api/appeals');
+    const pending = appeals.filter(a => a.status === 'pending');
+    const select = document.getElementById('revisitAppealId');
+    select.innerHTML = '<option value="">请选择申诉</option>' +
+      pending.map(a => `<option value="${a.id}" ${a.id === appealId ? 'selected' : ''}>${a.id}号 - ${a.head_name}（${a.family_code}）</option>`).join('');
+
+    if (appealId) {
+      const appeal = pending.find(a => a.id === appealId);
+      if (appeal) {
+        document.getElementById('revisitFamilyId').value = appeal.family_id || '';
+      }
+    }
+  } catch (e) { return; }
+
+  document.getElementById('revisitModal').classList.add('active');
+}
+
+async function openRevisitModal() {
+  openRevisitModalForAppeal(null);
+}
+
+async function saveRevisit() {
+  const form = document.getElementById('revisitForm');
+  const alertEl = document.getElementById('revisitAlert');
+  const photoFile = document.getElementById('revisitPhoto').files[0];
+
+  if (!photoFile) {
+    alertEl.textContent = '❌ 走访照片为必填项，照片缺失不能提交复访';
+    alertEl.style.display = 'block';
+    alertEl.className = 'alert alert-error';
+    return;
+  }
+
+  if (!form.appeal_id.value) {
+    alertEl.textContent = '❌ 请选择关联申诉';
+    alertEl.style.display = 'block';
+    alertEl.className = 'alert alert-error';
+    return;
+  }
+
+  const appealId = form.appeal_id.value;
+  let familyId = null;
+
+  try {
+    const appeal = await api('/api/appeals/' + appealId);
+    familyId = appeal.family_id;
+  } catch (e) {
+    alertEl.textContent = '❌ 申诉信息获取失败';
+    alertEl.style.display = 'block';
+    alertEl.className = 'alert alert-error';
+    return;
+  }
+
+  const fd = new FormData();
+  fd.append('appeal_id', appealId);
+  fd.append('family_id', familyId);
+  fd.append('visitor_name', form.visitor_name.value);
+  fd.append('visit_date', form.visit_date.value);
+  fd.append('location', form.location.value || '');
+  fd.append('income_change', form.income_change.value || 0);
+  fd.append('notes', form.notes.value || '');
+  fd.append('photo', photoFile);
+
+  try {
+    await api('/api/revisits', { method: 'POST', body: fd });
+    showToast('复访记录提交成功');
+    closeModal('revisitModal');
+    loadAppeals();
+  } catch (e) {
+    alertEl.textContent = '❌ ' + e.message;
+    alertEl.style.display = 'block';
+    alertEl.className = 'alert alert-error';
+  }
+}
+
+// ==================== 补贴追回 ====================
+
+async function loadRecoveries() {
+  try {
+    const recoveries = await api('/api/recoveries');
+    const container = document.getElementById('recoveriesList');
+    if (recoveries.length === 0) {
+      container.innerHTML = '<div class="empty-state"><div class="icon">💸</div><p>暂无追回记录</p></div>';
+      return;
+    }
+    container.innerHTML = recoveries.map(r => `
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">
+              ${r.head_name}（${r.family_code}）
+              <span class="status-tag status-${r.status}">${getRecoveryStatus(r.status)}</span>
+            </div>
+            <div class="card-subtitle">追回金额：<strong style="color:#fa8c16;">¥ ${r.total_amount.toFixed(2)}</strong></div>
+          </div>
+          <div class="card-actions">
+            ${r.status === 'pending' ? `
+              <button class="btn btn-sm btn-success" onclick="reviewRecovery(${r.id}, true)">确认</button>
+              <button class="btn btn-sm btn-danger" onclick="reviewRecovery(${r.id}, false)">驳回</button>
+            ` : ''}
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="info-item"><span class="label">已发放月数：</span><span class="value">${r.months_issued} 个月</span></div>
+          <div class="info-item"><span class="label">每月补贴：</span><span class="value">${r.monthly_amount} 元</span></div>
+          <div class="info-item"><span class="label">冻结月数：</span><span class="value">${r.freeze_months || 0} 个月</span></div>
+          ${r.hardship_desc ? `<div class="info-item" style="grid-column:1/-1;"><span class="label">困难说明：</span><span class="value">${r.hardship_desc}</span></div>` : ''}
+          ${r.installment_note ? `<div class="info-item" style="grid-column:1/-1;"><span class="label">分期备注：</span><span class="value">${r.installment_note}</span></div>` : ''}
+          ${r.reviewer_name ? `
+            <div class="info-item"><span class="label">审核人：</span><span class="value">${r.reviewer_name}</span></div>
+            ${r.review_reason ? `<div class="info-item"><span class="label">审核说明：</span><span class="value">${r.review_reason}</span></div>` : ''}
+          ` : ''}
+        </div>
+      </div>
+    `).join('');
+  } catch (e) {}
+}
+
+function getRecoveryStatus(s) {
+  const map = { pending: '待确认', approved: '已确认', rejected: '已驳回' };
+  return map[s] || s;
+}
+
+async function openRecoveryModal() {
+  document.getElementById('recoveryForm').reset();
+  document.getElementById('recoveryCalcResult').style.display = 'none';
+
+  try {
+    const families = await api('/api/families');
+    const familySelect = document.getElementById('recoveryFamilyId');
+    familySelect.innerHTML = '<option value="">请选择家庭</option>' +
+      families.map(f => `<option value="${f.id}">${f.family_code} - ${f.head_name} [${getStatusText(f.subsidy_status)}]</option>`).join('');
+
+    const appeals = await api('/api/appeals');
+    const appealSelect = document.getElementById('recoveryAppealId');
+    appealSelect.innerHTML = '<option value="">（可选）关联申诉</option>' +
+      appeals.map(a => `<option value="${a.id}">${a.id}号 - ${a.head_name}（${a.family_code}）</option>`).join('');
+  } catch (e) { return; }
+
+  document.getElementById('recoveryModal').classList.add('active');
+}
+
+async function calculateRecovery() {
+  const form = document.getElementById('recoveryForm');
+  const resultEl = document.getElementById('recoveryCalcResult');
+
+  if (!form.family_id.value || !form.months_issued.value || !form.monthly_amount.value) {
+    showToast('请先填写家庭、已发放月数和每月补贴金额', 'error');
+    return;
+  }
+
+  try {
+    const res = await api('/api/recoveries/calculate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        family_id: form.family_id.value,
+        months_issued: parseInt(form.months_issued.value),
+        monthly_amount: parseFloat(form.monthly_amount.value),
+        freeze_months: parseInt(form.freeze_months.value) || 0,
+        hardship_desc: form.hardship_desc.value
+      })
+    });
+    resultEl.innerHTML = `
+      <h4>🧮 追回金额计算结果</h4>
+      <div class="info-grid">
+        <div>基础金额：<strong>${res.base_amount.toFixed(2)} 元</strong></div>
+        ${res.freeze_deduction > 0 ? `<div>冻结期扣减：<strong style="color:#52c41a;">- ${res.freeze_deduction.toFixed(2)} 元</strong></div>` : ''}
+        ${res.hardship_reduction > 0 ? `<div>困难减免：<strong style="color:#52c41a;">- ${res.hardship_reduction.toFixed(2)} 元</strong></div>` : ''}
+        <div style="grid-column:1/-1;font-size:18px;font-weight:600;color:#fa8c16;">
+          追回金额总计：${res.total_amount.toFixed(2)} 元
+        </div>
+      </div>
+      <div style="margin-top:8px;font-size:13px;color:#666;">${res.calculation_detail}</div>
+    `;
+    resultEl.style.display = 'block';
+    resultEl.className = 'info-panel';
+  } catch (e) {}
+}
+
+async function saveRecovery() {
+  const form = document.getElementById('recoveryForm');
+  if (!form.family_id.value || !form.months_issued.value || !form.monthly_amount.value) {
+    showToast('请填写必填项', 'error');
+    return;
+  }
+
+  try {
+    const res = await api('/api/recoveries', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        family_id: form.family_id.value,
+        appeal_id: form.appeal_id.value || null,
+        months_issued: parseInt(form.months_issued.value),
+        monthly_amount: parseFloat(form.monthly_amount.value),
+        freeze_months: parseInt(form.freeze_months.value) || 0,
+        hardship_desc: form.hardship_desc.value,
+        installment_note: form.installment_note.value
+      })
+    });
+    showToast('追回记录已生成，金额：' + res.total_amount + ' 元');
+    closeModal('recoveryModal');
+    loadRecoveries();
+  } catch (e) {}
+}
+
+async function reviewRecovery(id, approved) {
+  const reason = prompt(approved ? '请输入确认说明（可选）：' : '请输入驳回理由：');
+  try {
+    await api('/api/recoveries/' + id + '/review', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reviewer_name: document.getElementById('operatorName').value,
+        approved,
+        reason: reason || ''
+      })
+    });
+    showToast(approved ? '追回已确认' : '追回已驳回');
+    loadRecoveries();
+  } catch (e) {}
 }

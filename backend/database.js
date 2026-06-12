@@ -175,6 +175,56 @@ async function initDB() {
       reviewed_at DATETIME,
       FOREIGN KEY (family_id) REFERENCES families(id)
     );
+
+    CREATE TABLE IF NOT EXISTS appeals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      family_id INTEGER NOT NULL,
+      applicant_name TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      material_desc TEXT,
+      status TEXT DEFAULT 'pending',
+      reviewer_name TEXT,
+      review_decision TEXT,
+      review_reason TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      reviewed_at DATETIME,
+      FOREIGN KEY (family_id) REFERENCES families(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS revisits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      appeal_id INTEGER NOT NULL,
+      family_id INTEGER NOT NULL,
+      visitor_name TEXT NOT NULL,
+      visit_date DATETIME NOT NULL,
+      location TEXT,
+      income_change REAL DEFAULT 0,
+      notes TEXT,
+      photo_path TEXT NOT NULL,
+      status TEXT DEFAULT 'submitted',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (appeal_id) REFERENCES appeals(id),
+      FOREIGN KEY (family_id) REFERENCES families(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS recoveries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      family_id INTEGER NOT NULL,
+      appeal_id INTEGER,
+      months_issued INTEGER NOT NULL,
+      monthly_amount REAL NOT NULL,
+      freeze_months INTEGER DEFAULT 0,
+      hardship_desc TEXT,
+      total_amount REAL NOT NULL,
+      installment_note TEXT,
+      status TEXT DEFAULT 'pending',
+      reviewer_name TEXT,
+      review_reason TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      reviewed_at DATETIME,
+      FOREIGN KEY (family_id) REFERENCES families(id),
+      FOREIGN KEY (appeal_id) REFERENCES appeals(id)
+    );
   `);
 
   const cnt = getOne('SELECT COUNT(*) as cnt FROM families').cnt;
